@@ -44,6 +44,59 @@ def _encode_payments(payments):
         args.append(pair)
     return args, value
 
+class AbstractToken(object):
+    def __init__(self, client : Client, privkey):
+        self._client = client
+        self._privkey = privkey
+        self._eth_address = '0x' + encode_hex(keys.privtoaddr(privkey))
+
+    def _get_balance(self, abi, token_address) -> int:
+        addr = keys.privtoaddr(self._privkey)
+        data = abi.encode('balanceOf', (addr,))
+        r = self._client.call(_from='0x' + encode_hex(addr),
+                               to='0x' + encode_hex(token_address),
+                               data='0x' + encode_hex(data),
+                               block='pending')
+        if r is None or r == '0x':
+            balance = 0
+        else:
+            balance = int(r, 16)
+        return balance
+
+    def _request_from_faucet(self, abi, token_address) -> None:
+        nonce = self._client.get_transaction_count(self._eth_address)
+        data = abi.encode_function_call('create', ())
+        tx = Transaction(nonce,
+                         PaymentProcessor.GAS_PRICE,
+                         90000,
+                         to=token_address,
+                         value=0,
+                         data=data)
+        tx.sign(self._privkey)
+        self._client.send(tx)
+
+
+
+class SimpleGNTToken(AbstractToken):
+    """
+    When the main token and the batchTransfer function are in the same contract.
+    Which is the case for tGNT in testnet and eventually (after migration)
+     will be the case for the new GNT in the mainnet as well.
+    """
+    TOKEN_ADDR = decode_hex("7295bB8709EC1C22b758A8119A4214fFEd016323")
+
+    def __init__(self, client : Client, privkey):
+        super().__init__(client, privkey)
+        self.__testGNT = abi.ContractTranslator(json.loads(TestGNT.ABI))
+
+    def get_balance(self) -> int:
+        balance = self._get_balance(self.__testGNT, self.TOKEN_ADDR)
+        log.info("TestGNT: {}".format(balance / denoms.ether))
+        return balance
+
+    def request_from_faucet(self) -> None:
+        self._request_from_faucet(self.__testGNT, self.TOKEN_ADDR)
+
 
 class PaymentProcessor(LoopingCallService):
     # Default deadline in seconds for new payments.
@@ -61,14 +114,13 @@ class PaymentProcessor(LoopingCallService):
     # TODO: Adjust this value later and add MAX_PAYMENTS limit.
     GAS_RESERVATION = 21000 + 1000 * 50000
 
-    TESTGNT_ADDR = decode_hex("7295bB8709EC1C22b758A8119A4214fFEd016323")
-
     SYNC_CHECK_INTERVAL = 10
 
     # Minimal number of confirmations before we treat transactions as done
     REQUIRED_CONFIRMATIONS = 12
 
     def __init__(self, client: Client, privkey, faucet=False) -> None:
+        self.__token = SimpleGNTToken(client, privkey)
         self.__client = client
         self.__privkey = privkey
         self.__eth_balance = None
@@ -80,7 +132,6 @@ class PaymentProcessor(LoopingCallService):
         self.__sync = False
         self.__temp_sync = False
         self.__faucet = faucet
-        self.__testGNT = abi.ContractTranslator(json.loads(TestGNT.ABI))
         self._waiting_for_faucet = False
         self.deadline = sys.maxsize
         self.load_from_db()
@@ -167,17 +218,7 @@ class PaymentProcessor(LoopingCallService):
 
     def gnt_balance(self, refresh=False):
         if self.__gnt_balance is None or refresh:
-            addr = keys.privtoaddr(self.__privkey)
-            data = self.__testGNT.encode('balanceOf', (addr,))
-            r = self.__client.call(_from='0x' + encode_hex(addr),
-                                   to='0x' + encode_hex(self.TESTGNT_ADDR),
-                                   data='0x' + encode_hex(data),
-                                   block='pending')
-            if r is None or r == '0x':
-                self.__gnt_balance = 0
-            else:
-                self.__gnt_balance = int(r, 16)
-            log.info("GNT: {}".format(self.__gnt_balance / denoms.ether))
+            self.__gnt_balance = self.__token.get_balance()
         return self.__gnt_balance
 
     def _eth_reserved(self):
@@ -262,7 +303,7 @@ class PaymentProcessor(LoopingCallService):
         p, value = _encode_payments(payments)
         data = gnt_contract.encode('batchTransfer', [p])
         gas = 21000 + 800 + 5000 + len(p) * 30000
-        tx = Transaction(nonce, self.GAS_PRICE, gas, to=self.TESTGNT_ADDR,
+        tx = Transaction(nonce, self.GAS_PRICE, gas, to=self.__token.TOKEN_ADDR,
                          value=0, data=data)
         tx.sign(self.__privkey)
         h = tx.hash
@@ -358,14 +399,8 @@ class PaymentProcessor(LoopingCallService):
 
     def get_gnt_from_faucet(self):
         if self.__faucet and self.gnt_balance(True) < 100 * denoms.ether:
-            log.info("Requesting tGNT")
-            addr = self.eth_address(zpad=False)
-            nonce = self.__client.get_transaction_count(addr)
-            data = self.__testGNT.encode_function_call('create', ())
-            tx = Transaction(nonce, self.GAS_PRICE, 90000, to=self.TESTGNT_ADDR,
-                             value=0, data=data)
-            tx.sign(self.__privkey)
-            self.__client.send(tx)
+            log.info("Requesting GNT from faucet")
+            self.__token.request_from_faucet()
             return False
         return True
 

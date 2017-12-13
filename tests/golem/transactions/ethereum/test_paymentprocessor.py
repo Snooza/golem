@@ -17,7 +17,7 @@ from twisted.internet.task import Clock
 from golem.ethereum import Client
 from golem.ethereum.contracts import TestGNT
 from golem.ethereum.node import Faucet
-from golem.ethereum.paymentprocessor import PaymentProcessor
+from golem.ethereum.paymentprocessor import PaymentProcessor, SimpleGNTToken
 from golem.model import Payment, PaymentStatus
 from golem.testutils import DatabaseFixture
 from golem.utils import encode_hex, decode_hex
@@ -429,7 +429,8 @@ class PaymentProcessorFunctionalTest(DatabaseFixture):
         print('gnt_addr %s', gnt_addr)
         self.state.mine()
         self.gnt = tester.ABIContract(self.state, TEST_GNT_ABI, gnt_addr)
-        PaymentProcessor.TESTGNT_ADDR = decode_hex(gnt_addr)
+        SimpleGNTToken.TOKEN_ADDR = decode_hex(gnt_addr)
+        SimpleGNTToken.FAUCET_ADDR = decode_hex(gnt_addr)
         self.privkey = tester.k1
         self.client = mock.MagicMock(spec=Client)
         self.client.get_peer_count.return_value = 0
